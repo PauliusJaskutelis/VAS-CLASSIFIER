@@ -13,6 +13,7 @@ import numpy as np
 app = FastAPI()
 model = None
 last_used = time.time()
+in_use = False
 
 MODEL_DIR = Path("uploaded_models")
 MODEL_DIR.mkdir(exist_ok=True)
@@ -27,7 +28,8 @@ async def startup_event():
 
 @app.post("/upload-model")
 async def upload_model(file: UploadFile = File(...)):
-    global model, last_used
+    global model, last_used, in_use
+    in_use = True
 
     ext = Path(file.filename).suffix.lower()
     if ext not in SUPPORTED_EXTENSIONS:
@@ -44,9 +46,12 @@ async def upload_model(file: UploadFile = File(...)):
         model.summary()
         last_used = time.time()
     except Exception as e:
+        in_use = False
         model_path.unlink(missing_ok=True)
         raise HTTPException(status_code=422, detail=f"Model could not be loaded: {str(e)}")
-
+    
+    last_used = time.time()
+    in_use = False
     return {
         "message": "Model uploaded and validated successfully!",
         "model_id": model_id,
@@ -67,33 +72,46 @@ async def classify(
     prediction_count: int = Query(5),
     confidence_threshold: float = Query(0.1),
 ):
-    global last_used, model
-
+    global last_used, model, in_use
+    in_use = True
     if model is None:
         raise HTTPException(status_code=503, detail="No model loaded. Please upload a model first.")
+    try:
+        contents = await file.read()
+        image = Image.open(io.BytesIO(contents)).convert("RGB")
+        prepped = prepare_image(image)
 
-    contents = await file.read()
-    image = Image.open(io.BytesIO(contents)).convert("RGB")
-    prepped = prepare_image(image)
+        predictions = model.predict(prepped)
 
-    predictions = model.predict(prepped)
-    decoded = tf.keras.applications.mobilenet_v2.decode_predictions(predictions, top=prediction_count)[0]
+        try:
+            decoded = tf.keras.applications.mobilenet_v2.decode_predictions(predictions, top=prediction_count)[0]
 
-    results = [
-        {"label": label, "confidence": float(confidence)}
-        for (_, label, confidence) in decoded
-        if confidence > confidence_threshold
-    ]
-
+            results = [
+                {"label": label, "confidence": float(confidence)}
+                for (_, label, confidence) in decoded
+                if confidence > confidence_threshold
+            ]
+        except Exception:
+            results = [
+                {"label": str(i), "confidence": float(score)}
+                for i, score in enumerate(predictions[0])
+                if score > confidence_threshold
+            ]
+    except Exception as e:
+        in_use = False
+        raise HTTPException(status_code=500, detail=f"Failed to classify image: {str(e)}")
+    
     last_used = time.time()
+    in_use = False
     return {"results": results}
 
 
 async def shutdown_monitor(timeout: int = 120):
     """Shuts down the container after inactivity timeout (default: 120 seconds)."""
     global last_used
+    global in_use
     while True:
         await asyncio.sleep(10)
-        if model and (time.time() - last_used > timeout):
+        if not in_use and (time.time() - last_used > timeout):
             print("💤 No activity detected. Shutting down container...")
             os._exit(0)
