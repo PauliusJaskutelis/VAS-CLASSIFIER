@@ -71,32 +71,53 @@ async def classify(
     file: UploadFile = File(...),
     prediction_count: int = Query(5),
     confidence_threshold: float = Query(0.1),
+    resize_height: int = Query(28),
+    resize_width: int = Query(28),
+    normalize: bool = Query(True),
+    color_mode: str = Query("auto")  # options: auto, RGB, L
 ):
     global last_used, model, in_use
     in_use = True
+
     if model is None:
         raise HTTPException(status_code=503, detail="No model loaded. Please upload a model first.")
+    
     try:
         contents = await file.read()
-        image = Image.open(io.BytesIO(contents)).convert("RGB")
-        prepped = prepare_image(image)
+        image = Image.open(io.BytesIO(contents))
 
-        predictions = model.predict(prepped)
+        # Handle color mode
+        input_shape = model.input_shape
+        channels = input_shape[-1] if len(input_shape) == 4 else 1
+
+        if color_mode == "auto":
+            image = image.convert("L") if channels == 1 else image.convert("RGB")
+        else:
+            image = image.convert(color_mode)
+
+        # Resize
+        image = image.resize((resize_width, resize_height))
+
+        # Convert to numpy array
+        img_array = tf.keras.preprocessing.image.img_to_array(image)
+
+        # For grayscale, may need to expand dimensions
+        if channels == 1 and img_array.ndim == 2:
+            img_array = np.expand_dims(img_array, axis=-1)
+
+        if normalize:
+            img_array = img_array.astype("float32") / 255.0
+
+        input_data = np.expand_dims(img_array, axis=0)
+
+        predictions = model.predict(input_data)
 
         try:
             decoded = tf.keras.applications.mobilenet_v2.decode_predictions(predictions, top=prediction_count)[0]
-
-            results = [
-                {"label": label, "confidence": float(confidence)}
-                for (_, label, confidence) in decoded
-                if confidence > confidence_threshold
-            ]
+            results = [{"label": label, "confidence": float(conf)} for (_, label, conf) in decoded if conf > confidence_threshold]
         except Exception:
-            results = [
-                {"label": str(i), "confidence": float(score)}
-                for i, score in enumerate(predictions[0])
-                if score > confidence_threshold
-            ]
+            results = [{"label": str(i), "confidence": float(score)} for i, score in enumerate(predictions[0]) if score > confidence_threshold]
+
     except Exception as e:
         in_use = False
         raise HTTPException(status_code=500, detail=f"Failed to classify image: {str(e)}")
@@ -105,6 +126,10 @@ async def classify(
     in_use = False
     return {"results": results}
 
+@app.get("/has-model")
+async def has_model():
+    global model
+    return {"loaded": model is not None}
 
 async def shutdown_monitor(timeout: int = 120):
     """Shuts down the container after inactivity timeout (default: 120 seconds)."""
