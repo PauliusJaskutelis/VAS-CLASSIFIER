@@ -21,4 +21,4 @@ COPY . .
 EXPOSE 5000
 
 # Run the server
-CMD ["uvicorn", "modelMetadata:app", "--host", "0.0.0.0", "--port", "5001"]
+CMD ["uvicorn", "modelMetadata:app", "--host", "0.0.0.0", "--port", "5000"]
