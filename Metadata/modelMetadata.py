@@ -7,6 +7,8 @@ from pathlib import Path
 import shutil
 import uuid
 import tensorflow as tf
+from PIL import Image
+from io import BytesIO
 
 app = FastAPI()
 model = None
@@ -26,6 +28,12 @@ class ModelMetadata(BaseModel):
     preprocessing: str = "normalize"
     storage_path: str
 
+class ImageMetadata(BaseModel):
+    filename: str
+    width: int
+    height: int
+    color_mode: str
+    format: str
 
 @app.on_event("startup")
 async def startup_event():
@@ -77,6 +85,32 @@ async def extract_metadata(file: UploadFile = File(...)):
         input_shape=input_shape_safe,
         storage_path=str(model_path)
     )
+
+@app.post("/extract-image-metadata", response_model=ImageMetadata)
+async def extract_image_metadata(file: UploadFile = File(...)):
+    try:
+        image_data = await file.read()
+        image = Image.open(BytesIO(image_data))
+
+        print(f"Image opened: {image.format}, {image.size}, {image.mode}")
+
+        mode = image.mode
+        if mode == "L":
+            color_mode = "L"
+        elif mode in ["RGB", "RGBA", "P", "LA"]:
+            color_mode = "RGB"
+        else:
+            color_mode = mode  # fallback
+
+        return ImageMetadata(
+            filename=file.filename,
+            width=image.width,
+            height=image.height,
+            color_mode=color_mode,
+            format=image.format
+        )
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Image could not be processed: {str(e)}")
 
 @app.post("/shutdown")
 def shutdown():
